@@ -1,0 +1,415 @@
+---
+title: "Statistique spatiale"
+author: "Abdoul Razac SANE"
+date: "10/03/2022"
+output:
+  pdf_document:
+    toc: yes
+  html_document:
+    toc: yes
+    theme: united
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE, warning = FALSE, message = FALSE)
+```
+
+## Chargement des packages
+```{r}
+library(dplyr)
+library(sf)
+library(cartography)
+library(RColorBrewer)
+library(spdep)
+library(GGally)
+library(spatialreg)
+```
+
+## 1. Import des données et matrice de poids
+
+### Chargement des fichiers de données
+```{r}
+df <- st_read("south00/south00.shp")
+```
+
+### Création du voisinage de type Queen et de la matrice de poids
+```{r}
+vois_queen <- poly2nb(df, row.names = df$FIPS, queen = TRUE)
+poids_queen <- nb2listw(vois_queen, style = "W", zero.policy = TRUE)
+```
+
+## 2. Cartographie de la proportion d’enfants vivant dans la pauvreté
+```{r}
+# Conversion de PPOV en pourcentage
+df <- df %>% mutate(PPOV2 = 100*PPOV) 
+```
+
+
+```{r, dpi=600}
+# Cartographie
+plot(st_geometry(df))
+choroLayer(df,
+           var = "PPOV2", 
+           # method = "quantile",
+           # nclass = 5,
+           breaks = 0:6*10,
+           col = brewer.pal(6,'OrRd'),
+           legend.title.txt = "% d'enfants\npauvres",
+           legend.title.cex = .8, legend.pos = "topleft",
+           add = TRUE)
+title("Proportion d’enfants vivant dans la pauvreté\ndans le Sud et le Sud-Est des Etats-Unis")
+layoutLayer( title = "", author = "Abdoul Razac SANE", north = TRUE, frame = F)
+```
+
+
+## 3. Test de Moran
+
+Le test de Moran permet de tester l'existence d'une autocorrélation spatiale entre les comtés.
+
+Les hypothèses de ce test sont :
+ 
+ * $H_0$ : Pas d'autocorrélation spatiale
+ 
+ * $H_1$ : Existence d'une autocorrélation spatiale
+
+Pour ce faire nous vérifions tout d'abord si la part des enfants pauvres (PPOV) suit une distribution  normale.
+
+```{r}
+# Histogramme de PPOV2
+hist(df$PPOV2, border = "white", 
+     probability = TRUE, 
+     las = 1,
+     col = "cornflowerblue", 
+     xlab = "", ylab = "Densité",
+     main = "Distribution de la part d'enfants vivant dans la pauvreté")
+lines(density(df$PPOV2), col = "orange", lwd=1.5)
+```
+
+```{r}
+# Test de Shapiro-Wilk sur PPOV
+shapiro.test(df$PPOV)
+```
+Le test de Shapiro-Wilk rejette de l'hypothèse de normalité. On conclut que le vecteur d'observation n'est pas gaussien, Cela nous conduit à un test de Moran avec bootstrap.
+
+```{r}
+# Test de Moran avec Bootstrap
+test_moran <- moran.mc(df$PPOV , poids_queen, 999, zero.policy=FALSE, alternative="greater")
+test_moran
+```
+
+La p-valeur est très petite (inférieure à 0.001) donc nous rejetons l'hypothèse $H_0$ alors il y a une autocorrélation spatiale positive de proportion d'enfants vivant dans la pauvreté entre les comtés. Plus cette proportion est élevée dans un comté, plus elle est élevée dans les comtés voisins. L'indice de Moran vaut $0.5893$.
+
+
+
+## 4. Test de Moran Local
+```{r}
+# Calcul des LISA
+lisa <- localmoran(df$PPOV, poids_queen, zero.policy=T) %>% 
+  as.data.frame()
+names(lisa) <- c("Ii","Ei","Vari","Zi","pvi")
+rownames(lisa) <- df$CNTY_ST
+head(lisa)
+```
+
+* Cartographie des indices locaux de Moran
+```{r}
+# Création des indices dans la base de données
+df$indice_local <- lisa$Ii
+df$indice_local_positif <- ifelse(lisa$Ii >= 0, "Positif", "Négatif")
+df$indice_local_signif <- if_else(lisa$pvi < 0.05 , "Significatif", "Non significatif", missing = "Non significatif")
+```
+
+```{r}
+#  Cartographie des LISA
+plot_sf(df)
+typoLayer(df, var = "indice_local_positif",
+           legend.title.txt = "LISA",
+           col = c("#92C5DE", "#F4A582"),
+           legend.title.cex = .8, legend.pos = "topleft",
+           add = TRUE)
+title("Indice de Moran local par comté", cex = 0.6)
+layoutLayer( title = "", author = "Abdoul Razac SANE", north = TRUE, frame = F)
+```
+
+
+```{r}
+#  Cartographie des LISA
+plot_sf(df)
+typoLayer(df, var = "indice_local_signif",
+           legend.title.txt = "LISA",
+           col = c("gray90", "#F4A582"),
+           legend.title.cex = .8, legend.pos = "topleft",
+           add = TRUE)
+title("Indice de Moran local significatif par comté")
+layoutLayer( title = "", author = "Abdoul Razac SANE", north = TRUE, frame = F)
+```
+
+Le test moran.mc a tendance à surestimer la p-valeur (car la loi est simulée par Bootstrap). Ce qui conduit à beaucoup de valeurs significatives. On peut ajuster ces p-valeurs par la méthode de Holm.
+ 
+ 
+```{r}
+# Création de la variable p_holm et p_holm_signif
+df <- df %>% mutate(
+  p_holm = p.adjust(lisa$pvi, method="holm"), # Ajustement de Holm
+  p_holm_signif = if_else(p_holm < 0.05, "Significatif", "Non significatif", missing = "Non significatif")
+)
+```
+
+```{r}
+# Carte des comtés avec un p_hlom significatif
+plot_sf(df)
+typoLayer(df, var = "p_holm_signif",
+           legend.title.txt = "LISA",
+           col = c("gray90", "#F4A582"),
+           legend.title.cex = .8, legend.pos = "topleft",
+           add = TRUE)
+title("Indice de Moran local significatif avec la méthode Holm")
+layoutLayer( title = "", author = "Abdoul Razac SANE", north = TRUE, frame = F)
+```
+
+* Diagramme de moran
+```{r}
+# Diagramme de Moran
+df$PPOV_std <- scale(df$PPOV)
+moran.plot(as.vector(df$PPOV_std), poids_queen, zero.policy=F,
+           xlab = "Variable PPOV standardisée", ylab = "Spatially lagged",
+           main = "Diagramme de Moran")
+```
+Nous avons cartographié les slots. Seuls les comtés avec un indice de Moran local significatif ont été représentés.
+
+```{r}
+# Création des catégories de slots et des slots avec un p_holm significatif
+df <- df %>% mutate(
+  indice_local_lag = lag.listw(poids_queen, PPOV_std, zero.policy=F),
+  slots = case_when(
+    PPOV_std > 0 & indice_local_lag > 0 ~ "HH",
+    PPOV_std < 0 & indice_local_lag < 0  ~ "LL",
+    PPOV_std < 0 & indice_local_lag > 0  ~ "LH",
+    PPOV_std > 0 & indice_local_lag < 0  ~ "HL"
+  ),
+  slots_signif = if_else(p_holm < 0.05, slots, "Non signif")
+)
+```
+
+
+```{r}
+# Cartographie des slots
+plot_sf(df)
+typoLayer(df, var = "slots",
+           legend.title.txt = "LISA",
+           col = c("#DDCC77", "#CC6677", "#4477AA", "#117733"),
+           legend.title.cex = .8, legend.pos = "topleft",
+           add = TRUE)
+title("Slots des comtés avec la méthode Holm")
+layoutLayer( title = "", author = "Abdoul Razac SANE", north = TRUE, frame = F)
+```
+
+
+```{r}
+# Cartographie des slots avec un p_hlom significatif
+plot_sf(df)
+typoLayer(df, var = "slots_signif",
+           legend.title.txt = "LISA",
+           col = c("#FFFFFF", "#CC6677", "#117733", "#DDCC77", "#4477AA"),
+           legend.title.cex = .8, legend.pos = "topleft",
+           add = TRUE)
+title("Slots des comtés significatifs avec la méthode Holm")
+layoutLayer( title = "", author = "Abdoul Razac SANE", north = TRUE, frame = F)
+```
+
+Dans les comtés rouges, nous avons une forte association spatiale positive. Dans ces comtés, il y a une forte part d'enfants pauvres tout comme dans les comtés voisins.  Deuxièmement les comtés bleus ont une association spatiale négative. Ils ont une faible part d'enfants pauvres tout comme leurs voisins. Il y a deux comtés qui ont des proportions d'enfants pauvres différentes de leurs voisins. Pour le comté jaune, cette proportion est faible tandis qu'elle est élevée pour le comté vert.
+
+
+## 5. Corrélation des variables explicatives
+```{r}
+df %>% 
+  as_tibble() %>% 
+  select(PHSP, PFHH, PUNEM, PEXTR, PBLK, P65UP, METRO, PHSPLUS) %>% 
+  ggcorr(label = TRUE)
+```
+
+La corrélation la plus élevée se situe entre les proportions de femmes cheffes de foyers et d'afro-américains. Elle est positive avec une valeur de 0,9. La valeur absolue des autres coefficents de corrélation est inférieure à 0,6.
+
+## 6. Modèle linéaire
+```{r}
+mod <- lm(PPOV ~ PHSP + PFHH + PUNEM + PEXTR + PBLK + P65UP + METRO + PHSPLUS, data = df)
+summary(mod)
+```
+
+Nous avons un modèle qui explique 78% de la variabilité totale ($R^2_{ajusté}=0,7819$. Toutes nos variables sont significatives exceptée la proportion de personnes âgées de 65 ans et plus. La proportion des sans emploi a un effet plus prononcé ; une augmentation de cette proportion d'un point de pourcentage entraine une augmentation de la propotion d'enfants pauvres de 1,4 points de pourcentage.
+
+Les comtés métropolitains, la proportion d’afro-américains et la proportion de diplômés du secondaire ou plus ont un effet négatif sur la proportion d'enfants vivant dans la pauvreté.
+Toutefois la proportion d’afro-américains a un effet incohérent. En effet, elle est fortement et positivement corrélée avec la poportion de femmes cheffes de famille donc elle devrait avoir une influence qui va dans le même sens que cette dernière.
+
+## 7. Remarque sur la variable 
+
+La remarque sur l'effet controversé de la proportion d'afro-américains (PBLK) dans le modèle pourrait être un éventuel problème de multi-collinéarité entre elle et la proportion de femmes cheffes de famille.
+
+## 8. Etude de la multicolinéarité des variables explicatives
+```{r}
+car::vif(mod = mod)
+```
+
+Comme nous l'avons mentionné plus haut, le $VIF$ confirme la multicolinéarité entre la proportion d'afro-américains (PBLK) et la proportion de femmes cheffes de famille (PFHH). Pour résoudre ce problème, on peut soit créer un indicateur synthétique à partir d'une analyse en composante principale (ACP) sur les régresseurs corrélés, soit exclure un de ces régresseurs.
+
+## 9. Mise en oeuvre du deuxième modèle linéaire. 
+
+Dans ce modèle nous excluons la proportion d'afro-américains (PBLK) des régresseurs.
+
+```{r}
+mod2 <- lm(PPOV ~ PHSP + PFHH + PUNEM + PEXTR  + P65UP + METRO + PHSPLUS, data = df)
+summary(mod2)
+```
+Le modèle est assez stable. Toutes les variables explicatives sont significatives et conservent leur effet (positif ou négtif) sur la variable dépendante qu'est la proportion d'enfants vivant dans la pauvreté.
+
+### Résidus du modèle.
+
+```{r}
+ggplot() +
+  aes(x =  1:length(mod2$residuals), y = mod2$residuals) + 
+  geom_jitter(color = "black", alpha = 0.5) +
+  labs(x = "", y = "Résidus", title = "Distribution des résidus") + 
+  theme_minimal()
+```
+
+```{r}
+# Test de Shapiro-Wilk sur les résidus
+shapiro.test(mod2$residuals)
+```
+
+Le test de Shapiro-Wilk rejette l'hypothèse de normalité des résidus.
+
+### Test de Moran sur les résidus
+```{r}
+lm.morantest(mod2, listw = poids_queen, zero.policy = TRUE)
+```
+
+Le test de Moran sur les résidus montre qu'il existe une autocorrélation spatiale positive entre les résidus des comtés.
+
+### Cartographie de résidus
+```{r}
+# Cartographie des résidus
+df$residus_mod2 <- mod2$residuals
+plot_sf(df)
+choroLayer(df, var = "residus_mod2",
+           legend.title.txt = "Résidus", 
+           nclass = 6, 
+           legend.values.rnd = 3,
+           col = brewer.pal(6,'OrRd'),
+           legend.title.cex = .8, legend.pos = "topleft",
+           add = TRUE)
+title("Répartition spatiale des résidus du modèle 2")
+layoutLayer( title = "", author = "Abdoul Razac SANE", north = TRUE, frame = F)
+```
+
+La carte des résidus représente l'écart de proportion d'enfants pauvres à la moyenne globale. On remarque que les résidus ne sont pas répartis de manière régulière dans l'espace.
+
+### Test d'hétéroscédasticité des résidus
+```{r}
+lmtest::bgtest(mod2)
+```
+Le test d'hétéroscédasticité des résidus est significatif au seuil de 1%. Donc le paramètre de variance des résidus est alétoire. Ce qui confirme l'interprétation précédante de la carte. 
+
+### Justification du modèle spatial.
+
+Les résidus du modèle linéaire ne sont pas gaussiens. Ils sont spatialement corrélés et on a une hétéroscédasticité des résidus dans l'espace. De ce fait le modèle linéaire n'est pas approprié pour notre phénomène. Un modèle spatial serait plus approprié pour la modélisation de notre phénomène car ce dernier prend en compte l'autocorrélation spatiale.
+
+
+## 10. 11. 12. Choix entre modèle LAD et SEM
+Nous faisons tout d'abord les différents tests du Multiplicateur de Lagrange.
+```{r}
+test_ML <- lm.LMtests(mod2, listw = poids_queen, test =c("LMerr","RLMerr","LMlag","RLMlag","SARMA"), zero.policy = TRUE)
+plyr::ldply(test_ML, function(x) c("Statictic"  = as.numeric(x$statistic), "P.valeur" = x$p.value))
+```
+
+Les tests de Multiplicateur de Lagrange et les tests robustes ne permettent pas de choisir entre le modèle SEM et LAG puisque toutes les p-valeurs sont significatives et tendent vers 0. Les termes d'interraction $\rho$ et $\lambda$ sont non nuls. Donc nous implémentons ces deux modèles et nous determinons le meilleur à l'aide du test de rapport de vraisemblance.
+
+```{r}
+# Modèle LAD et SEM
+mod_lag <- lagsarlm(mod2$call$formula, data = df, poids_queen)
+mod_sem <- errorsarlm(mod2$call$formula, data = df, poids_queen)
+```
+
+```{r}
+# AIC des modèle LAG et SEM
+glue::glue("AIC modèle LAG = {round(AIC(mod_lag), 2)}\n AIC modèle SEM = {round(AIC(mod_sem), 2)}")
+```
+
+L'AIC du modèle SEM est le plus faible, on choisit donc celui-là pour la modélisation spatiale.
+
+```{r}
+summary(mod_sem)
+```
+
+Le modèle SEM s'interprête de la même manière que le modèle linéaire. La prise en compte de la dimension spatiale dans ce modèle annule l'effet de la variable « comté métropolitain » et attenue l'estimation des autres variable. Tous les coefficients des variables explcatives conservent leur signe.
+
+```{r}
+# Test du ratio de vraisemblance
+LR.Sarlm(mod2, mod_sem)
+```
+
+Le test de log ratio nous confirme que le modèle SEM nous donne de meilleurs résultats que la régression linéaire.
+
+* Effet du modèle non choisi : le modèle LAG.
+```{r}
+trMatc <- as(poids_queen, "CsparseMatrix") %>% 
+  trW(type="mult")
+```
+
+
+```{r}
+# Effet du modèle LAG
+impacts(mod_lag, R = 200, tr = trMatc) %>% summary(zstats=TRUE, short=TRUE)
+```
+
+Nous avons ici les effets moyens directs et indirects des régresseurs sur la proportion moyenne d'enfants pauvres. Les effets directs concernent les régresseurs d'un comté observé sur lui-même et les effets indirects concernent les régresseurs des comtés voisins sur le comté observé. Par exemple, plus la proportion d'hispaniques (PHSP) est élevée dans le comté observé et ses voisins, plus la proportion d'enfants pauvres est élevée dans le comté observé.
+
+
+
+* Test d'hétéroscédasticité sur notre modèle choisi, le modèle SEM.
+```{r}
+bptest.Sarlm(mod_sem)
+```
+
+L'hétéroscédasticité des résidus demeure toujours avec le modèle SEM (P-valeur < 0,05) bien qu'il donne de meilleurs résultats par rapport aux modèles linéaire et LAG. On essayera par la suite de voir s'il existe un modèle meilleur que le SEM.
+
+
+## 14. Pour le modèle SDM au lieu du modèle SEM ou LAG
+
+Le modèle SDM (Spatial Durbin Model) est plus général par rapport modèle SEM ou LAG. Ce modèle ajoute un autre paramètre ($\theta = -\rho \beta$) qui permet de prendre en compte  l’hétéroscédasticité et la corrélation spatiale.
+
+
+## 15. Mise en oeuvre du modèle SDM
+```{r}
+mod_sdm <- lagsarlm(mod2$call$formula, data = df, listw = poids_queen, type="mixed")
+```
+
+## 16. Comparaison des modèles SEM et SDM
+
+```{r}
+LR.Sarlm(mod_sem, mod_sdm)
+```
+
+Le modèle SEM est un cas particulier du modèle SDM (modèles emboités). La statistique du test du rapport de vraisemblance nous donne la variation de la déviance du passage d'un modèle à l'autre. Elle suit une loi de $\chi^2$. Ce test nous dit que le modèle SDM est meilleur que le modèle SEM (P-valeur < 0,05). Donc l'ajout de l'interaction est justifié.
+
+## 17. Estimation des effets directs et indirects du modèle SDM
+
+```{r}
+# Effet du modèle SDM
+impacts(mod_sdm, R = 200, tr = trMatc) %>% summary(zstats=TRUE, short=TRUE)
+```
+
+La proportion d'hispaniques (PHSP), la proportion d’employés dans l’industrie extractive (PEXTR), la proportion des 65 ans et plus (P65UP),  la proportion des diplômés (PHSPLUS) n'ont pas d'impact indirect (P-valeur > 0,05) sur la proportion d'enfants vivant dans la pauvreté.
+
+Le fait que le comté soit métropolitain ou pas n'a pas d'influence sur sa proportion d'enfants pauvres, cependant la nature des comtés voisins aura un effet sur celle-ci. Les effets de cette régression spatiale (modèle SDM) s'interprêtent comme le modèle LAG.
+
+## 18. Le modèle SDM est-il justifié ?
+Comme nous l'avons mentionné à la question 16, le modèle SDM donne de meilleurs résultats par rapport aux modèles linéaire et LAG. Toutefois, il ne prend pas en compte la totalité de l'autocorrélation spatiale comme le montre le test suivant :
+```{r}
+bptest.Sarlm(mod_sdm)
+```
+Il existe d'autres modèles qui prennent mieux en compte l'hétéroscédasticité et l'autocorrélation spatiale (FLOCH et LE SAOUT, Insee, N° 131 Octobre 2018) tels que : 
+
+* les clusters spatiaux du type Newey-West
+
+* la méthode paramétrique de type HAC
